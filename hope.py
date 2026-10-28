@@ -600,6 +600,15 @@ def consumer_tap_fractions(
   224 x 224 inputs) by exact layer name `conv_b` first and then by prefix
   `conv_b[:5]`, falling back to 14.0.
 
+  For any other kernel size (e.g. 5x5, 7x7, or a non-square kernel) the
+  returned fractions are all ones: every tap is treated as reading inside
+  the feature map. That is an approximation, not the exact in-bounds
+  fraction (for a k x k kernel with padding (k - 1) / 2 the exact 1D
+  fractions taper below 1 near the edges, as in the 3x3 case above), and
+  it is what the encoder's cost model uses for such consumers. ResNet-50
+  bottleneck consumers are only ever 1x1 or 3x3, so the reference ResNet
+  pipeline never takes this path.
+
   Args:
     kernel_b: Consumer kernel of shape (h_b, w_b, c_in, c_out) or (c_in, c_out).
     conv_b: Name of the consumer layer.
@@ -2306,6 +2315,12 @@ def hope_decode_step(
   """
   action = packet.action
   if action == "EVICT":
+    if packet.saved_block_tensors is None:
+      raise ValueError(
+          "Cannot decode an EVICT packet with saved_block_tensors=None: "
+          "undoing an eviction requires the block tensors the encoder saved "
+          "in the packet."
+      )
     for path, saved in packet.saved_block_tensors.items():
       weights[path][:] = saved
     return weights
@@ -2390,11 +2405,18 @@ def hope_decode(
       modified).
     curriculum: Sequence of `InstructionPacket`s in decoding order.
     num_steps: Number of packets from the start of `curriculum` to apply, or
-      None to apply all packets.
+      None to apply all packets. Must be non-negative when given.
 
   Returns:
     New dictionary of decoded weight arrays.
+
+  Raises:
+    ValueError: If `num_steps` is negative.
   """
+  if num_steps is not None and num_steps < 0:
+    raise ValueError(
+        f"num_steps must be None or a non-negative integer, got {num_steps!r}."
+    )
   decoded = {k: v.copy() for k, v in weights.items()}
   for packet in itertools.islice(curriculum, num_steps):
     hope_decode_step(decoded, packet)
