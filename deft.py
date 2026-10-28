@@ -192,6 +192,7 @@ Requires numpy >= 2.0, scipy >= 1.13, jax, optax, keras >= 3.5, tensorflow >=
 
 import argparse
 import functools
+import math
 import os
 import tempfile
 import time
@@ -2090,10 +2091,33 @@ def _unpack_curriculum_entry(
         float(packet.e_b),
         int(packet.n_active),
     )
+  action = str(packet["action"])
+  # Legacy dicts store the neuron indices either bare (`(i,)` for PRUNE,
+  # `(i, j)` for MERGE) or in `InstructionPacket` shape (`(-1, i, conv)` for
+  # PRUNE, `(i, j, conv)` for MERGE, `(conv_1, conv_2, conv_3)` for EVICT).
+  # Keep only the integer-convertible entries (dropping any layer-name
+  # strings, which made this branch raise `ValueError` on packet-shaped
+  # dicts) and select the neuron indices exactly as in the packet branch
+  # above.
+  int_indices = []
+  for idx in packet["indices"]:
+    try:
+      int_indices.append(int(idx))
+    except (TypeError, ValueError):
+      continue
+  if action == "PRUNE":
+    # `(-1, i, conv)` stores the neuron at position 1; a bare `(i,)` at 0.
+    indices = (int_indices[1],) if int_indices[:1] == [-1] else (
+        int_indices[0],
+    )
+  elif action == "MERGE":
+    indices = tuple(int_indices[:2])
+  else:
+    indices = ()
   return (
-      str(packet["action"]),
+      action,
       str(packet["layer_name"]),
-      tuple(int(idx) for idx in packet["indices"]),
+      indices,
       float(packet["norm"]),
       float(packet["E_b"]),
       int(packet["N_active"]),
@@ -2538,6 +2562,36 @@ def _positive_int(value: str) -> int:
   return parsed
 
 
+def _positive_float(value: str) -> float:
+  """Argparse type validator requiring a finite float > 0 (learning rates)."""
+  parsed = float(value)
+  if not math.isfinite(parsed) or parsed <= 0.0:
+    raise argparse.ArgumentTypeError(
+        f"Expected a finite positive float, got {value}"
+    )
+  return parsed
+
+
+def _nonnegative_float(value: str) -> float:
+  """Argparse type validator requiring a finite float >= 0 (EWC lambda)."""
+  parsed = float(value)
+  if not math.isfinite(parsed) or parsed < 0.0:
+    raise argparse.ArgumentTypeError(
+        f"Expected a finite non-negative float, got {value}"
+    )
+  return parsed
+
+
+def _percentile_float(value: str) -> float:
+  """Argparse type validator requiring a percentile in (0, 100]."""
+  parsed = float(value)
+  if not math.isfinite(parsed) or not 0.0 < parsed <= 100.0:
+    raise argparse.ArgumentTypeError(
+        f"Expected a percentile in (0, 100], got {value}"
+    )
+  return parsed
+
+
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
   """Parses command-line flags for `deft.py`.
 
@@ -2649,7 +2703,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
   )
   parser.add_argument(
       "--deft_percentile",
-      type=float,
+      type=_percentile_float,
       default=30.0,
       help=(
           "Locked DEFT percentile threshold P* when --skip_presweep is active"
@@ -2658,7 +2712,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
   )
   parser.add_argument(
       "--deft_lr",
-      type=float,
+      type=_positive_float,
       default=0.005,
       help=(
           "Locked DEFT learning rate when --skip_presweep is active (default:"
@@ -2667,7 +2721,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
   )
   parser.add_argument(
       "--head_only_lr",
-      type=float,
+      type=_positive_float,
       default=0.005,
       help=(
           "Locked Head-Only FT learning rate when --skip_presweep is active"
@@ -2676,7 +2730,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
   )
   parser.add_argument(
       "--finetune_lr",
-      type=float,
+      type=_positive_float,
       default=1e-4,
       help=(
           "Locked Standard Full FT learning rate when --skip_presweep is active"
@@ -2685,7 +2739,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
   )
   parser.add_argument(
       "--ewc_lambda",
-      type=float,
+      type=_nonnegative_float,
       default=1e7,
       help=(
           "Locked EWC Fisher penalty lambda* when --skip_presweep is active"
@@ -2694,7 +2748,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
   )
   parser.add_argument(
       "--ewc_lr",
-      type=float,
+      type=_positive_float,
       default=1e-4,
       help=(
           "Locked EWC learning rate when --skip_presweep is active (default:"
@@ -2703,7 +2757,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
   )
   parser.add_argument(
       "--peft_lr",
-      type=float,
+      type=_positive_float,
       default=1e-4,
       help=(
           "Locked PEFT (BN-Tuning) learning rate when --skip_presweep is active"
