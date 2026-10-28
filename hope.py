@@ -1540,6 +1540,13 @@ def hope_encode(
     steps, with density = number of
     nonzero entries over all tensors / its initial value (the value is 0.0 when
     eval_fn is None).
+
+  Raises:
+    ValueError: If a registered neuron's BN scale gamma / sqrt(var + eps)
+      is zero while its raw producer filter is nonzero: the neuron's folded
+      filter row is identically zero, so no PRUNE or MERGE packet could
+      restore the filter and the returned curriculum would not decode back
+      to the input weights.
   """
   t_start = time.time()
   state = _EncoderState(
@@ -1604,6 +1611,59 @@ def hope_encode(
   return state.weights, state.curriculum, history
 
 
+def _check_zero_bn_scale(
+    weights: Dict[str, np.ndarray],
+    quadruplet: Quadruplet,
+    producer_bn: Dict[str, np.ndarray],
+) -> None:
+  """Rejects registered neurons whose zero BN scale makes encoding lossy.
+
+  A neuron's BN-folded filter row is (gamma / sqrt(max(var, 0) + eps)) times
+  its raw filter, so a zero BN scale folds the row to zero however large the
+  raw filter is. PRUNE and MERGE packets store only the folded row, so
+  `hope_decode_step` cannot recover such a neuron's filter (see its
+  docstring): without this check `hope_encode` would silently return a
+  curriculum that does not decode back to the input weights. A zero-scale
+  neuron whose raw filter is already zero loses nothing and is accepted.
+
+  Args:
+    weights: The encoder's live weights (not modified).
+    quadruplet: The quadruplet being registered.
+    producer_bn: Producer BN tensors of the quadruplet, as returned by
+      `read_quadruplet`.
+
+  Raises:
+    ValueError: If a neuron of the quadruplet has a zero BN scale and a
+      nonzero raw producer filter.
+  """
+  conv_a, bn_a, _, _ = quadruplet
+  gamma = np.asarray(producer_bn["gamma"], dtype=np.float64)
+  var = np.asarray(producer_bn["var"], dtype=np.float64)
+  bn_scale = gamma / np.sqrt(np.maximum(var, 0.0) + BN_EPSILON)
+  zero_scale = np.flatnonzero(bn_scale == 0.0)
+  if zero_scale.size == 0:
+    return
+  kernel_a = weights[f"{conv_a}/kernel"]
+  kernel_a_4d = (
+      kernel_a
+      if kernel_a.ndim == 4
+      else kernel_a.reshape(1, 1, kernel_a.shape[0], kernel_a.shape[1])
+  )
+  for i in zero_scale:
+    num_nonzero = int(np.count_nonzero(kernel_a_4d[..., int(i)]))
+    if num_nonzero:
+      raise ValueError(
+          f"hope_encode cannot losslessly encode neuron {int(i)} of"
+          f" '{conv_a}' (batch norm '{bn_a}'): its BN scale"
+          " gamma / sqrt(var + eps) is zero"
+          f" (gamma = {float(gamma[i])}), so its BN-folded filter row is"
+          " identically zero and a PRUNE or MERGE packet cannot restore"
+          f" its raw filter ({num_nonzero} nonzero entries would be lost"
+          " on decode). Give the neuron a nonzero BN gamma, or exclude"
+          " this quadruplet, before encoding."
+      )
+
+
 def _initialize_caches(
     state: _EncoderState, quadruplets: Sequence[Quadruplet]
 ) -> int:
@@ -1627,6 +1687,7 @@ def _initialize_caches(
     joint_weights, fan_in, producer_bn = read_quadruplet(
         state.weights, quadruplet
     )
+    _check_zero_bn_scale(state.weights, quadruplet, producer_bn)
     num_neurons = joint_weights.shape[0]
     total_neurons += num_neurons
 
