@@ -1,0 +1,40 @@
+# Runs the core self-test suite (test_hope.py) on every push and pull
+# request. The suite needs only NumPy and SciPy: test_hope.py imports
+# hope, hope_baselines and plot_compression_curves, none of which require
+# the TensorFlow/JAX stack used by compress_resnet50.py and deft.py, so
+# the heavy requirements.txt entries are deliberately not installed here.
+
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.13 is the version the README lists as tested; the core
+        # library uses only Python 3.9-compatible syntax, and the older
+        # entries guard against accidental use of newer syntax/APIs.
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "numpy>=2.0" "scipy>=1.13" pytest
+
+      - name: Run tests
+        run: python -m pytest test_hope.py -q
