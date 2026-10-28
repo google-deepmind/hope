@@ -883,12 +883,10 @@ def compute_diagonal_fim(
   """Computes the exact per-example diagonal Fisher Information Matrix over the source training set (Appendix H.4)."""
   print("  -> Computing FIM for EWC...")
   fim_accumulators = [jnp.zeros_like(w) for w in trainable_weights]
-  num_batches = 0
+  num_examples = 0
 
   for i in range(0, len(x_data), batch_size):
     x_b, y_b = x_data[i : i + batch_size], y_data[i : i + batch_size]
-    if len(x_b) < batch_size:
-      continue
 
     batch_fim = _batch_fisher_jit(
         trainable_weights,
@@ -898,10 +896,17 @@ def compute_diagonal_fim(
         y_b,
         num_classes,
     )
-    fim_accumulators = [acc + f for acc, f in zip(fim_accumulators, batch_fim)]
-    num_batches += 1
+    # _batch_fisher_jit returns the per-example mean over its batch, so
+    # weight each batch by its size. The trailing partial batch then counts
+    # exactly like a full one and the result is the exact per-example
+    # Fisher over the whole dataset; when every batch is full, the common
+    # batch_size factor cancels and this is the previous batch average.
+    fim_accumulators = [
+        acc + f * len(x_b) for acc, f in zip(fim_accumulators, batch_fim)
+    ]
+    num_examples += len(x_b)
 
-  return [acc / max(num_batches, 1) for acc in fim_accumulators]
+  return [acc / max(num_examples, 1) for acc in fim_accumulators]
 
 
 @functools.partial(
