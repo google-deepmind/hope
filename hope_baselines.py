@@ -577,6 +577,14 @@ def _execute_baseline_prune(
   conv_a, bn_a, conv_b, bn_b = quadruplet
   k_a = current_weights[f"{conv_a}/kernel"]
   k_b = current_weights[f"{conv_b}/kernel"]
+  # The consumer kernel may be 2D (Dense consumer, as in hope.py's mixed
+  # Conv/Dense quadruplets); index it through a 4D view that shares storage
+  # with the stored tensor, matching hope.read_quadruplet's convention.
+  k_b4 = (
+      k_b
+      if k_b.ndim == 4
+      else k_b.reshape(1, 1, k_b.shape[0], k_b.shape[1])
+  )
 
   gamma_i = current_weights[f"{bn_a}/gamma"][i]
   beta_i = current_weights[f"{bn_a}/beta"][i]
@@ -588,16 +596,23 @@ def _execute_baseline_prune(
   )
   scale_i = gamma_i * inv_std_i
   w_n_i = (k_a[..., i] * scale_i).reshape(-1)
-  w_c_i = k_b[:, :, i, :].reshape(-1)
+  w_c_i = k_b4[:, :, i, :].reshape(-1)
   victim_row_before = np.concatenate([w_n_i, w_c_i])
 
   param_delta = 0
   consumer_mean_before: Optional[np.ndarray] = None
-  if benchmark_method == "L1_JOINT_BIASCORR":
+  # The consumer BN compensation only applies when the consumer actually
+  # has a BatchNorm (quadruplets with `bn_b=None`, e.g. a Dense consumer,
+  # have no running mean to shift) - the same `has_consumer_bn` guard that
+  # hope.py's own prune uses.
+  has_consumer_bn = (
+      bn_b is not None and f"{bn_b}/moving_mean" in current_weights
+  )
+  if benchmark_method == "L1_JOINT_BIASCORR" and has_consumer_bn:
     consumer_mean_before = current_weights[f"{bn_b}/moving_mean"].copy()
     m_i = hope.relu_mean_scalar(abs(float(gamma_i)), float(beta_i))
     chi_2d = hope.consumer_tap_fractions(k_b, conv_b)
-    w_chi_i = np.sum(chi_2d * k_b[:, :, i, :], axis=(0, 1))
+    w_chi_i = np.sum(chi_2d * k_b4[:, :, i, :], axis=(0, 1))
     delta_mu_b = -(m_i * w_chi_i)
     if conv_b in cost_manager.active_neurons:
       active_b = cost_manager.active_neurons[conv_b]
@@ -625,10 +640,10 @@ def _execute_baseline_prune(
   )
 
   removed_nz = int(np.count_nonzero(k_a[..., i])) + int(
-      np.count_nonzero(k_b[:, :, i, :])
+      np.count_nonzero(k_b4[:, :, i, :])
   )
   k_a[..., i] = 0.0
-  k_b[:, :, i, :] = 0.0
+  k_b4[:, :, i, :] = 0.0
   for param in ("gamma", "beta", "moving_mean", "moving_variance"):
     arr = current_weights[f"{bn_a}/{param}"]
     if arr[i] != 0.0:
@@ -667,6 +682,13 @@ def _execute_baseline_merge(
   conv_a, bn_a, conv_b, _ = quadruplet
   k_a = current_weights[f"{conv_a}/kernel"]
   k_b = current_weights[f"{conv_b}/kernel"]
+  # See _execute_baseline_prune: index a 2D (Dense) consumer kernel through
+  # a storage-sharing 4D view.
+  k_b4 = (
+      k_b
+      if k_b.ndim == 4
+      else k_b.reshape(1, 1, k_b.shape[0], k_b.shape[1])
+  )
 
   gamma_i = current_weights[f"{bn_a}/gamma"][i]
   beta_i = current_weights[f"{bn_a}/beta"][i]
@@ -683,7 +705,7 @@ def _execute_baseline_merge(
   )
   scale_i = gamma_i * inv_std_i
   w_n_i = (k_a[..., i] * scale_i).reshape(-1)
-  w_c_i = k_b[:, :, i, :].reshape(-1)
+  w_c_i = k_b4[:, :, i, :].reshape(-1)
   row_i_before = np.concatenate([w_n_i, w_c_i])
 
   inv_std_j = np.float32(1.0) / np.sqrt(
@@ -691,7 +713,7 @@ def _execute_baseline_merge(
   )
   scale_j = gamma_j * inv_std_j
   w_n_j = (k_a[..., j] * scale_j).reshape(-1)
-  w_c_j = k_b[:, :, j, :].reshape(-1)
+  w_c_j = k_b4[:, :, j, :].reshape(-1)
   row_j_before = np.concatenate([w_n_j, w_c_j])
 
   # Synthesize merged parent in Euclidean weight space from live weights of i
@@ -750,7 +772,7 @@ def _execute_baseline_merge(
   bare_k_n = (eff_n_p / (scale_new + hope.RAW_WEIGHT_DIV_GUARD)).astype(
       k_a.dtype
   )
-  new_kb_slice_i = w_out_p.astype(k_b.dtype).reshape(k_b.shape[0:2] + (-1,))
+  new_kb_slice_i = w_out_p.astype(k_b.dtype).reshape(k_b4.shape[0:2] + (-1,))
 
   curriculum.append(
       hope.InstructionPacket(
@@ -776,8 +798,8 @@ def _execute_baseline_merge(
   nz_before = (
       int(np.count_nonzero(k_a[..., i]))
       + int(np.count_nonzero(k_a[..., j]))
-      + int(np.count_nonzero(k_b[:, :, i, :]))
-      + int(np.count_nonzero(k_b[:, :, j, :]))
+      + int(np.count_nonzero(k_b4[:, :, i, :]))
+      + int(np.count_nonzero(k_b4[:, :, j, :]))
   )
   for param in ("gamma", "beta", "moving_mean", "moving_variance"):
     arr = current_weights[f"{bn_a}/{param}"]
@@ -788,8 +810,8 @@ def _execute_baseline_merge(
 
   k_a[..., i] = bare_k_n.reshape(k_a.shape[:-1])
   k_a[..., j] = 0.0
-  k_b[:, :, i, :] = new_kb_slice_i
-  k_b[:, :, j, :] = 0.0
+  k_b4[:, :, i, :] = new_kb_slice_i
+  k_b4[:, :, j, :] = 0.0
 
   current_weights[f"{bn_a}/gamma"][i] = np.float32(gamma_new)
   current_weights[f"{bn_a}/beta"][i] = np.float32(beta_new)
@@ -799,7 +821,7 @@ def _execute_baseline_merge(
     current_weights[f"{bn_a}/{param}"][j] = 0.0
 
   nz_after = int(np.count_nonzero(k_a[..., i])) + int(
-      np.count_nonzero(k_b[:, :, i, :])
+      np.count_nonzero(k_b4[:, :, i, :])
   )
   for param in ("gamma", "beta", "moving_mean", "moving_variance"):
     if current_weights[f"{bn_a}/{param}"][i] != 0.0:
@@ -836,7 +858,7 @@ def _execute_baseline_merge(
       current_weights[f"{bn_a}/beta"][i]
   ) - scale_i_live * float(current_weights[f"{bn_a}/moving_mean"][i])
   w_in_aug_i_live = np.append(w_eff_i_live, b_eff_i_live)
-  w_out_i_live = k_b[:, :, i, :].reshape(-1).astype(np.float64)
+  w_out_i_live = k_b4[:, :, i, :].reshape(-1).astype(np.float64)
 
   a_i_live = float(np.linalg.norm(w_in_aug_i_live))
   b_i_live = float(np.linalg.norm(w_out_i_live))
@@ -1076,7 +1098,13 @@ def baseline_encode(
     if eval_stride > 0 and (
         step_counter % eval_stride == 0 or step_counter < 5
     ):
-      density = float(current_params) / float(total_params_initial)
+      # An all-zero input network has total_params_initial == 0; report
+      # density 0.0 for it instead of dividing by zero.
+      density = (
+          float(current_params) / float(total_params_initial)
+          if total_params_initial > 0
+          else 0.0
+      )
       acc = float(eval_fn(current_weights)) if eval_fn is not None else 0.0
       results.append((np.float64(density), np.float64(acc)))
       if resolved_output_file is not None and eval_fn is not None:
@@ -1112,7 +1140,11 @@ def baseline_encode(
     step_counter += 1
 
   if eval_stride > 0 and step_counter > 0:
-    final_density = float(current_params) / float(total_params_initial)
+    final_density = (
+        float(current_params) / float(total_params_initial)
+        if total_params_initial > 0
+        else 0.0
+    )
     final_acc = float(eval_fn(current_weights)) if eval_fn is not None else 0.0
     results.append((np.float64(final_density), np.float64(final_acc)))
 
