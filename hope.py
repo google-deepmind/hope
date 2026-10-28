@@ -561,9 +561,16 @@ def read_quadruplet(
   bn_scale = gamma * inv_std
 
   w_in_eff = kernel_a_4d * bn_scale.reshape(1, 1, 1, -1)
-  w_in_rows = w_in_eff.reshape(-1, w_in_eff.shape[-1]).T
+  # Explicit reshape dimensions (not -1): a zero-width layer (a kernel
+  # dimension of size 0) makes a -1 dimension impossible to infer and
+  # NumPy raises "cannot reshape array of size 0" for it.
+  w_in_rows = w_in_eff.reshape(
+      w_in_eff.shape[0] * w_in_eff.shape[1] * w_in_eff.shape[2],
+      w_in_eff.shape[3],
+  ).T
   w_out_rows = kernel_b_4d.transpose(2, 0, 1, 3).reshape(
-      kernel_b_4d.shape[2], -1
+      kernel_b_4d.shape[2],
+      kernel_b_4d.shape[0] * kernel_b_4d.shape[1] * kernel_b_4d.shape[3],
   )
 
   joint_weights = np.hstack([w_in_rows, w_out_rows])
@@ -1485,6 +1492,18 @@ class _EncoderState:
 # ==============================================================================
 
 
+def _nonzero_density(nonzeros: int, initial_nonzeros: int) -> float:
+  """Density `nonzeros / initial_nonzeros`, defined as 0.0 for a zero model.
+
+  A weights dictionary whose tensors are all zero (or empty) has
+  `initial_nonzeros == 0`; its density is 0.0 at every step instead of
+  raising `ZeroDivisionError`.
+  """
+  if initial_nonzeros == 0:
+    return 0.0
+  return float(nonzeros) / float(initial_nonzeros)
+
+
 def _write_density_accuracy_csv(
     path: str, rows: Sequence[Tuple[float, float]]
 ) -> None:
@@ -1585,7 +1604,7 @@ def hope_encode(
 
     if eval_stride > 0 and step % eval_stride == 0:
       nonzeros = sum(np.count_nonzero(v) for v in state.weights.values())
-      density = float(nonzeros) / float(initial_nonzeros)
+      density = _nonzero_density(nonzeros, initial_nonzeros)
       value = float(eval_fn(state.weights)) if eval_fn is not None else 0.0
       history.append((np.float64(density), np.float64(value)))
       if csv_path is not None:
@@ -1595,7 +1614,7 @@ def hope_encode(
   if csv_path is not None:
     if step % eval_stride != 0:
       nonzeros = sum(np.count_nonzero(v) for v in state.weights.values())
-      final_density = float(nonzeros) / float(initial_nonzeros)
+      final_density = _nonzero_density(nonzeros, initial_nonzeros)
       final_val = float(eval_fn(state.weights)) if eval_fn is not None else 0.0
       csv_rows.append((final_density, final_val))
     _write_density_accuracy_csv(csv_path, csv_rows)
@@ -2293,9 +2312,10 @@ def hope_decode_step(
   kernel = w_in^eff / (gamma / sqrt(var + eps) + RAW_WEIGHT_DIV_GUARD), which is
   exact up to rounding for ordinary neurons (5.96e-8 maximum error on the
   pretrained ResNet-50). It cannot recover the filter of a neuron whose BN scale
-  gamma / sqrt(var + eps) is zero or not large compared with the guard, and it
-  is inexact (NaN below -eps) for a negative stored moving variance, which the
-  encoder's BN folding clamps at 0.
+  gamma / sqrt(var + eps) is zero or not large compared with the guard. A
+  negative stored moving variance is clamped at 0, exactly as in the encoder's
+  BN folding, so such neurons are recovered with the clamped scale instead of
+  producing NaN.
 
   Args:
     weights: Mapping from Keras tensor name to array, modified in place.
@@ -2339,8 +2359,8 @@ def hope_decode_step(
     w_in_i, w_out_i = row_i[:fan_in], row_i[fan_in:]
     w_in_j, w_out_j = row_j[:fan_in], row_j[fan_in:]
 
-    bn_scale_i = gamma_i / np.sqrt(var_i + BN_EPSILON)
-    bn_scale_j = gamma_j / np.sqrt(var_j + BN_EPSILON)
+    bn_scale_i = gamma_i / np.sqrt(max(float(var_i), 0.0) + BN_EPSILON)
+    bn_scale_j = gamma_j / np.sqrt(max(float(var_j), 0.0) + BN_EPSILON)
 
     kernel_a[..., i] = (w_in_i / (bn_scale_i + RAW_WEIGHT_DIV_GUARD)).reshape(
         kernel_a.shape[:-1]
@@ -2362,7 +2382,7 @@ def hope_decode_step(
 
     row = packet.victim_row_before
     w_in, w_out = row[:fan_in], row[fan_in:]
-    bn_scale = gamma_i / np.sqrt(var_i + BN_EPSILON)
+    bn_scale = gamma_i / np.sqrt(max(float(var_i), 0.0) + BN_EPSILON)
     kernel_a[..., i] = (w_in / (bn_scale + RAW_WEIGHT_DIV_GUARD)).reshape(
         kernel_a.shape[:-1]
     )
