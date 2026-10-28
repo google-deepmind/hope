@@ -952,6 +952,18 @@ def merge_pair_geometry(
   psi_w_out = (1.0 / math.sqrt(frobenius_ratio)) * (v_star / math.sqrt(k_self))
 
   psi_c1, psi_c2 = span_coefficients(w_in_i, w_in_j, psi_w_in_aug[:-1])
+  # `span_coefficients` falls back to (0.5, 0.5) -- the coefficients of
+  # u_c itself -- when the Gram determinant is below 1e-12, discarding
+  # the sqrt(R_F) scale of psi*'s input weights sqrt(R_F) u_c. Rescale
+  # the fallback by sqrt(R_F) so the psi statistics below stay
+  # consistent with `alignment`: unscaled, psi_inner_i + psi_inner_j
+  # is off by 1 / sqrt(R_F) and psi_sq_norm by 1 / R_F.
+  gram_det = float(np.dot(w_in_i, w_in_i)) * float(
+      np.dot(w_in_j, w_in_j)
+  ) - float(np.dot(w_in_i, w_in_j)) ** 2
+  if abs(gram_det) < 1e-12:
+    psi_c1 *= math.sqrt(frobenius_ratio)
+    psi_c2 *= math.sqrt(frobenius_ratio)
   psi_gamma, psi_beta = _combined_preactivation(
       psi_c1, psi_c2, gamma_i, beta_i, gamma_j, beta_j, rho_hat
   )
@@ -1301,8 +1313,14 @@ def build_merge_cache(
   # psi*, the parent at s = 1 (gauge of `merge_pair_geometry`).
   sqrt_rf = np.sqrt(frobenius_ratio)
   inv_sqrt_rf = 1.0 / np.maximum(sqrt_rf, 1e-12)
-  psi_c1 = np.where(det_valid, sqrt_rf * best_sign * c1_pos, 0.5)
-  psi_c2 = np.where(det_valid, sqrt_rf * best_sign * c2_pos, 0.5)
+  # The fallback entries of c1_pos / c2_pos are (0.5, 0.5), the
+  # coefficients of u_c itself; they take the same sqrt(R_F) * sign
+  # scaling as the solved coefficients, because psi*'s input weights
+  # are sqrt(R_F) u_c. An unscaled (0.5, 0.5) would make the psi
+  # statistics below inconsistent with `alignment` by a factor of
+  # R_F (psi_inner_sum off by 1 / sqrt(R_F), psi_sq_norm by 1 / R_F).
+  psi_c1 = sqrt_rf * best_sign * c1_pos
+  psi_c2 = sqrt_rf * best_sign * c2_pos
   psi_gamma = np.sqrt(
       np.maximum(
           0.0,
