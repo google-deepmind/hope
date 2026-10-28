@@ -1940,6 +1940,24 @@ def _execute_merge(
       geometry, s_star, gamma_i, beta_i, gamma_j, beta_j
   )
 
+  # The parent must be a combination of the two *live* joint rows: the
+  # cached geometry still carries components that earlier actions in other
+  # layers have already eliminated from the live weights (e.g. the input
+  # slices of upstream neurons pruned before this merge). Writing those
+  # components into the parent would resurrect eliminated weights, so the
+  # parent's nonzero count could exceed the children's and the recorded
+  # density would increase. Zero every component that is zero in both live
+  # rows; such components multiply permanently-zero activations, so the
+  # parent's function on the live network is unchanged.
+  fan_in_cached = cached["fan_in"]
+  if row_i_before.shape[0] == fan_in_cached + parent.w_out.shape[0]:
+    live_support = (row_i_before != 0.0) | (row_j_before != 0.0)
+    if not np.all(live_support):
+      parent = parent._replace(
+          w_in_eff=parent.w_in_eff * live_support[:fan_in_cached],
+          w_out=parent.w_out * live_support[fan_in_cached:],
+      )
+
   producer_bn_before = (
       weights[f"{bn_a}/gamma"][i],
       weights[f"{bn_a}/beta"][i],
