@@ -993,16 +993,20 @@ def find_optimal_deft_hyperparams(
     x_test_svhn,
     y_test_svhn,
     coarse_to_fine,
+    pretrain_epochs=100,
+    finetune_epochs=FINETUNE_EPOCHS,
+    batch_size=BATCH_SIZE,
 ):
   """Runs the 2D DEFT hyperparameter pre-sweep over (P, eta) (Appendix H.5).
 
   Draws a single cross-domain tuning task with `seed=999` (disjoint from the 20
   evaluation scenarios generated with `seed in {0, 1, 2, 3}`), trains the source
-  expert for 100 epochs under the cosine-decay schedule of Appendix H.3, runs
+  expert for `pretrain_epochs` epochs under the cosine-decay schedule of
+  Appendix H.3, runs
   `encode_source_curriculum` (`hope.hope_encode`) once, and evaluates the grid:
     P   in {99, 95, 90, 80, 70, 60, 50, 40, 30, 20},
     eta in {0.04, 0.02, 0.01, 0.005, 0.001},
-  for 30 fine-tuning epochs on SVHN (capped at
+  for `finetune_epochs` fine-tuning epochs on SVHN (capped at
   `HYPERPARAM_PHASE_TRAIN_SAMPLE_CAP = 15,000` training examples). Selects the
   pair (P*, eta*) that maximizes the peak validation H-Score (Eq. 2695):
     H-Score = (2 * Acc_val^target * Acc_val^source) /
@@ -1074,10 +1078,10 @@ def find_optimal_deft_hyperparams(
 
     source_model.set_weights(pristine_weights)
 
-    steps_per_epoch = max(1, len(x_train_s) // BATCH_SIZE)
+    steps_per_epoch = max(1, len(x_train_s) // batch_size)
     lr_schedule = keras.optimizers.schedules.CosineDecay(
         initial_learning_rate=0.05,
-        decay_steps=100 * steps_per_epoch,
+        decay_steps=pretrain_epochs * steps_per_epoch,
         alpha=0.001,
     )
 
@@ -1092,8 +1096,8 @@ def find_optimal_deft_hyperparams(
     source_model.fit(
         x_train_s,
         y_train_s,
-        epochs=100,
-        batch_size=BATCH_SIZE,
+        epochs=pretrain_epochs,
+        batch_size=batch_size,
         validation_data=(x_val_s, y_val_s),
         verbose=0,
     )
@@ -1164,13 +1168,13 @@ def find_optimal_deft_hyperparams(
         opt_state = ft_opt.init(t_weights)
         peak_h_this_combo = -1.0
 
-        for epoch in range(FINETUNE_EPOCHS):
+        for epoch in range(finetune_epochs):
           perms = jax.random.permutation(
               jax.random.PRNGKey(epoch), len(x_train_d)
           )
-          for batch_idx in range(0, len(x_train_d), BATCH_SIZE):
-            batch_indices = perms[batch_idx : batch_idx + BATCH_SIZE]
-            if len(batch_indices) < BATCH_SIZE:
+          for batch_idx in range(0, len(x_train_d), batch_size):
+            batch_indices = perms[batch_idx : batch_idx + batch_size]
+            if len(batch_indices) < batch_size:
               continue
             t_weights, nt_weights, opt_state, _ = train_step_deft_jit(
                 t_weights,
@@ -1190,7 +1194,7 @@ def find_optimal_deft_hyperparams(
               target_apply_fn,
               x_val_d,
               y_val_d,
-              BATCH_SIZE * 2,
+              batch_size * 2,
               num_classes=10,
           )
           t_eval_s, nt_eval_s = get_source_eval_weights_fast(
@@ -1202,7 +1206,7 @@ def find_optimal_deft_hyperparams(
               source_apply_fn,
               x_val_s,
               y_val_s,
-              BATCH_SIZE * 2,
+              batch_size * 2,
               num_classes=NUM_SOURCE_CLASSES,
           )
 
@@ -1244,6 +1248,9 @@ def find_optimal_finetune_lr(
     x_test_svhn,
     y_test_svhn,
     coarse_to_fine,
+    pretrain_epochs=100,
+    finetune_epochs=FINETUNE_EPOCHS,
+    batch_size=BATCH_SIZE,
 ):
   """Tunes the learning rate for Standard Full Fine-Tuning on the seed-999 tuning task (Appendix H.5)."""
   print(
@@ -1286,10 +1293,10 @@ def find_optimal_finetune_lr(
 
     # Train source model with cosine-decay SGD (Appendix H.3)
     source_model.set_weights(pristine_weights)
-    steps_per_epoch = max(1, len(x_train_s) // BATCH_SIZE)
+    steps_per_epoch = max(1, len(x_train_s) // batch_size)
     lr_schedule = keras.optimizers.schedules.CosineDecay(
         initial_learning_rate=0.05,
-        decay_steps=100 * steps_per_epoch,
+        decay_steps=pretrain_epochs * steps_per_epoch,
         alpha=0.001,
     )
     source_model.compile(
@@ -1300,8 +1307,8 @@ def find_optimal_finetune_lr(
     source_model.fit(
         x_train_s,
         y_train_s,
-        epochs=100,
-        batch_size=BATCH_SIZE,
+        epochs=pretrain_epochs,
+        batch_size=batch_size,
         validation_data=(x_val_s, y_val_s),
         verbose=0,
     )
@@ -1340,13 +1347,13 @@ def find_optimal_finetune_lr(
       opt_state = ft_opt.init(t_weights)
       peak_h_this_lr = -1.0
 
-      for epoch in range(FINETUNE_EPOCHS):
+      for epoch in range(finetune_epochs):
         perms = jax.random.permutation(
             jax.random.PRNGKey(epoch), len(x_train_d)
         )
-        for batch_idx in range(0, len(x_train_d), BATCH_SIZE):
-          batch_indices = perms[batch_idx : batch_idx + BATCH_SIZE]
-          if len(batch_indices) < BATCH_SIZE:
+        for batch_idx in range(0, len(x_train_d), batch_size):
+          batch_indices = perms[batch_idx : batch_idx + batch_size]
+          if len(batch_indices) < batch_size:
             continue
 
           t_weights, nt_weights, opt_state, _ = train_step_deft_jit(
@@ -1367,7 +1374,7 @@ def find_optimal_finetune_lr(
             target_model.stateless_call,
             x_val_d,
             y_val_d,
-            BATCH_SIZE * 2,
+            batch_size * 2,
             num_classes=10,
         )
         t_eval_s, nt_eval_s = get_source_eval_weights(
@@ -1382,7 +1389,7 @@ def find_optimal_finetune_lr(
             source_model.stateless_call,
             x_val_s,
             y_val_s,
-            BATCH_SIZE * 2,
+            batch_size * 2,
             num_classes=NUM_SOURCE_CLASSES,
         )
 
@@ -1422,6 +1429,9 @@ def find_optimal_head_only_lr(
     x_test_svhn,
     y_test_svhn,
     coarse_to_fine,
+    pretrain_epochs=100,
+    finetune_epochs=FINETUNE_EPOCHS,
+    batch_size=BATCH_SIZE,
 ):
   """Tunes the learning rate for Head-Only Fine-Tuning on the seed-999 tuning task (Appendix H.5)."""
   print(
@@ -1461,10 +1471,10 @@ def find_optimal_head_only_lr(
 
     # Train source model with cosine-decay SGD (Appendix H.3)
     source_model.set_weights(pristine_weights)
-    steps_per_epoch = max(1, len(x_train_s) // BATCH_SIZE)
+    steps_per_epoch = max(1, len(x_train_s) // batch_size)
     lr_schedule = keras.optimizers.schedules.CosineDecay(
         initial_learning_rate=0.05,
-        decay_steps=100 * steps_per_epoch,
+        decay_steps=pretrain_epochs * steps_per_epoch,
         alpha=0.001,
     )
     source_model.compile(
@@ -1475,8 +1485,8 @@ def find_optimal_head_only_lr(
     source_model.fit(
         x_train_s,
         y_train_s,
-        epochs=100,
-        batch_size=BATCH_SIZE,
+        epochs=pretrain_epochs,
+        batch_size=batch_size,
         validation_data=(x_val_s, y_val_s),
         verbose=0,
     )
@@ -1515,13 +1525,13 @@ def find_optimal_head_only_lr(
       opt_state = ft_opt.init(t_weights)
       peak_h_this_lr = -1.0
 
-      for epoch in range(FINETUNE_EPOCHS):
+      for epoch in range(finetune_epochs):
         perms = jax.random.permutation(
             jax.random.PRNGKey(epoch), len(x_train_d)
         )
-        for batch_idx in range(0, len(x_train_d), BATCH_SIZE):
-          batch_indices = perms[batch_idx : batch_idx + BATCH_SIZE]
-          if len(batch_indices) < BATCH_SIZE:
+        for batch_idx in range(0, len(x_train_d), batch_size):
+          batch_indices = perms[batch_idx : batch_idx + batch_size]
+          if len(batch_indices) < batch_size:
             continue
 
           t_weights, nt_weights, opt_state, _ = train_step_deft_jit(
@@ -1542,7 +1552,7 @@ def find_optimal_head_only_lr(
             target_model.stateless_call,
             x_val_d,
             y_val_d,
-            BATCH_SIZE * 2,
+            batch_size * 2,
             num_classes=10,
         )
         t_eval_s, nt_eval_s = get_source_eval_weights(
@@ -1557,7 +1567,7 @@ def find_optimal_head_only_lr(
             source_model.stateless_call,
             x_val_s,
             y_val_s,
-            BATCH_SIZE * 2,
+            batch_size * 2,
             num_classes=NUM_SOURCE_CLASSES,
         )
 
@@ -1601,6 +1611,9 @@ def find_optimal_ewc_hyperparams(
     x_test_svhn,
     y_test_svhn,
     coarse_to_fine,
+    pretrain_epochs=100,
+    finetune_epochs=FINETUNE_EPOCHS,
+    batch_size=BATCH_SIZE,
 ):
   """Tunes the 2D hyperparameter grid (lambda, eta) for EWC on the seed-999 tuning task (Appendix H.5)."""
   print(
@@ -1656,10 +1669,10 @@ def find_optimal_ewc_hyperparams(
 
     # Train source model with cosine-decay SGD (Appendix H.3)
     source_model.set_weights(pristine_weights)
-    steps_per_epoch = max(1, len(x_train_s) // BATCH_SIZE)
+    steps_per_epoch = max(1, len(x_train_s) // batch_size)
     lr_schedule = keras.optimizers.schedules.CosineDecay(
         initial_learning_rate=0.05,
-        decay_steps=100 * steps_per_epoch,
+        decay_steps=pretrain_epochs * steps_per_epoch,
         alpha=0.001,
     )
     source_model.compile(
@@ -1670,8 +1683,8 @@ def find_optimal_ewc_hyperparams(
     source_model.fit(
         x_train_s,
         y_train_s,
-        epochs=100,
-        batch_size=BATCH_SIZE,
+        epochs=pretrain_epochs,
+        batch_size=batch_size,
         validation_data=(x_val_s, y_val_s),
         verbose=0,
     )
@@ -1689,7 +1702,7 @@ def find_optimal_ewc_hyperparams(
         source_model.stateless_call,
         x_train_s,
         y_train_s,
-        BATCH_SIZE,
+        batch_size,
         num_classes=NUM_SOURCE_CLASSES,
     )
 
@@ -1731,13 +1744,13 @@ def find_optimal_ewc_hyperparams(
         peak_h_this_lambda = -1.0
         diverged = False
 
-        for epoch in range(FINETUNE_EPOCHS):
+        for epoch in range(finetune_epochs):
           perms = jax.random.permutation(
               jax.random.PRNGKey(epoch), len(x_train_d)
           )
-          for batch_idx in range(0, len(x_train_d), BATCH_SIZE):
-            batch_indices = perms[batch_idx : batch_idx + BATCH_SIZE]
-            if len(batch_indices) < BATCH_SIZE:
+          for batch_idx in range(0, len(x_train_d), batch_size):
+            batch_indices = perms[batch_idx : batch_idx + batch_size]
+            if len(batch_indices) < batch_size:
               continue
 
             t_weights, nt_weights, opt_state, step_loss = train_step_ewc_jit(
@@ -1768,7 +1781,7 @@ def find_optimal_ewc_hyperparams(
                   target_model.stateless_call,
                   x_val_d,
                   y_val_d,
-                  BATCH_SIZE * 2,
+                  batch_size * 2,
                   num_classes=10,
               )
           )
@@ -1782,7 +1795,7 @@ def find_optimal_ewc_hyperparams(
                   source_model.stateless_call,
                   x_val_s,
                   y_val_s,
-                  BATCH_SIZE * 2,
+                  batch_size * 2,
                   num_classes=NUM_SOURCE_CLASSES,
               )
           )
@@ -1839,6 +1852,9 @@ def find_optimal_peft_lr(
     x_test_svhn,
     y_test_svhn,
     coarse_to_fine,
+    pretrain_epochs=100,
+    finetune_epochs=FINETUNE_EPOCHS,
+    batch_size=BATCH_SIZE,
 ):
   """Tunes the learning rate for PEFT (BatchNorm + Head Tuning) on the seed-999 tuning task (Appendix H.5)."""
   print(
@@ -1880,10 +1896,10 @@ def find_optimal_peft_lr(
 
     # Train source model with cosine-decay SGD (Appendix H.3)
     source_model.set_weights(pristine_weights)
-    steps_per_epoch = max(1, len(x_train_s) // BATCH_SIZE)
+    steps_per_epoch = max(1, len(x_train_s) // batch_size)
     lr_schedule = keras.optimizers.schedules.CosineDecay(
         initial_learning_rate=0.05,
-        decay_steps=100 * steps_per_epoch,
+        decay_steps=pretrain_epochs * steps_per_epoch,
         alpha=0.001,
     )
     source_model.compile(
@@ -1894,8 +1910,8 @@ def find_optimal_peft_lr(
     source_model.fit(
         x_train_s,
         y_train_s,
-        epochs=100,
-        batch_size=BATCH_SIZE,
+        epochs=pretrain_epochs,
+        batch_size=batch_size,
         validation_data=(x_val_s, y_val_s),
         verbose=0,
     )
@@ -1930,13 +1946,13 @@ def find_optimal_peft_lr(
       opt_state = ft_opt.init(t_weights)
       peak_h_this_lr = -1.0
 
-      for epoch in range(FINETUNE_EPOCHS):
+      for epoch in range(finetune_epochs):
         perms = jax.random.permutation(
             jax.random.PRNGKey(epoch), len(x_train_d)
         )
-        for batch_idx in range(0, len(x_train_d), BATCH_SIZE):
-          batch_indices = perms[batch_idx : batch_idx + BATCH_SIZE]
-          if len(batch_indices) < BATCH_SIZE:
+        for batch_idx in range(0, len(x_train_d), batch_size):
+          batch_indices = perms[batch_idx : batch_idx + batch_size]
+          if len(batch_indices) < batch_size:
             continue
 
           t_weights, nt_weights, opt_state, _ = train_step_deft_jit(
@@ -1957,7 +1973,7 @@ def find_optimal_peft_lr(
             target_model.stateless_call,
             x_val_d,
             y_val_d,
-            BATCH_SIZE * 2,
+            batch_size * 2,
             num_classes=10,
         )
         t_eval_s, nt_eval_s = get_source_eval_weights(
@@ -1972,7 +1988,7 @@ def find_optimal_peft_lr(
             source_model.stateless_call,
             x_val_s,
             y_val_s,
-            BATCH_SIZE * 2,
+            batch_size * 2,
             num_classes=NUM_SOURCE_CLASSES,
         )
 
@@ -2888,6 +2904,9 @@ def run_deft_benchmark(args: Optional[argparse.Namespace] = None):
         x_test_svhn,
         y_test_svhn,
         coarse_to_fine,
+        pretrain_epochs=pretrain_epochs,
+        finetune_epochs=finetune_epochs,
+        batch_size=batch_size,
     )
     optimal_lambda = ewc_configs["lambda"]
     optimal_ewc_lr = ewc_configs["lr"]
@@ -2909,6 +2928,9 @@ def run_deft_benchmark(args: Optional[argparse.Namespace] = None):
         x_test_svhn,
         y_test_svhn,
         coarse_to_fine,
+        pretrain_epochs=pretrain_epochs,
+        finetune_epochs=finetune_epochs,
+        batch_size=batch_size,
     )
 
     optimal_finetune_lr = find_optimal_finetune_lr(
@@ -2928,6 +2950,9 @@ def run_deft_benchmark(args: Optional[argparse.Namespace] = None):
         x_test_svhn,
         y_test_svhn,
         coarse_to_fine,
+        pretrain_epochs=pretrain_epochs,
+        finetune_epochs=finetune_epochs,
+        batch_size=batch_size,
     )
 
     optimal_head_only_lr = find_optimal_head_only_lr(
@@ -2947,6 +2972,9 @@ def run_deft_benchmark(args: Optional[argparse.Namespace] = None):
         x_test_svhn,
         y_test_svhn,
         coarse_to_fine,
+        pretrain_epochs=pretrain_epochs,
+        finetune_epochs=finetune_epochs,
+        batch_size=batch_size,
     )
 
     optimal_deft = find_optimal_deft_hyperparams(
@@ -2967,6 +2995,9 @@ def run_deft_benchmark(args: Optional[argparse.Namespace] = None):
         x_test_svhn,
         y_test_svhn,
         coarse_to_fine,
+        pretrain_epochs=pretrain_epochs,
+        finetune_epochs=finetune_epochs,
+        batch_size=batch_size,
     )
 
   # Pre-instantiate optimizers outside the trial loop so JAX reuses compiled
