@@ -406,8 +406,13 @@ def load_eval_set(
     )
   else:
     logger.info("Using cached evaluation images: %s", found[0])
-  images = np.load(found[0], mmap_mode="r")
-  labels = np.load(found[1])
+  try:
+    images = np.load(found[0], mmap_mode="r")
+    labels = np.load(found[1])
+  except (ValueError, OSError, EOFError) as e:
+    raise RuntimeError(
+        f"Corrupt evaluation cache {found[0]}; delete it and rerun."
+    ) from e
   if (
       images.ndim != 4
       or images.shape[1:] != (IMAGE_SIZE, IMAGE_SIZE, 3)
